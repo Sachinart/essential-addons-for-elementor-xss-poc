@@ -5,6 +5,10 @@ targets vulnerable 100K+ probably affecting for XSS https://nt.ls/AkTE9 (can dow
 
 ```pip install selenium webdriver-manager```
 
+##### Usage 
+```python poc.py targets.txt 10```
+
+```10 = amount of threads, i think 5 are default, depends on your RAM```
 
 ![image](https://github.com/user-attachments/assets/4167280d-787d-45cd-81eb-4a5c25368885)
 
