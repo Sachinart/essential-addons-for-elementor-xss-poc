@@ -1,0 +1,105 @@
+id: essential-addons-elementor-lite-detect
+info:
+  name: Essential Addons for Elementor Lite - Plugin Detection
+  author: ChiragArtani
+  severity: info
+  description: Detects the presence of Essential Addons for Elementor Lite WordPress plugin
+  tags:
+    - wordpress
+    - plugin
+    - elementor
+    - detect
+    - tech
+
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-content/plugins/essential-addons-for-elementor-lite/readme.txt"
+    
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      
+      - type: word
+        part: body
+        words:
+          - "=== Essential Addons for Elementor ==="
+          - "WPDeveloper"
+        condition: and
+      
+      - type: dsl
+        dsl:
+          - "!contains(tolower(body), '404 not found')"
+          - "!contains(tolower(body), 'not found on this server')"
+          - "!contains(tolower(body), 'page not found')"
+          - "!contains(tolower(body), 'error 404')"
+      
+      - type: word
+        part: header
+        words:
+          - "text/plain"
+          - "charset"
+        condition: and
+    
+    extractors:
+      - type: regex
+        name: version
+        group: 1
+        regex:
+          - "Stable tag: ([0-9.]+)"
+        part: body
+
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-content/plugins/essential-addons-for-elementor-lite/assets/front-end/css/view/advanced-accordion.css"
+    
+    redirects: true
+    max-redirects: 2
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      
+      - type: word
+        part: body
+        words:
+          - ".eael-adv-accordion"
+          - ".eael-accordion-list"
+        condition: and
+      
+      - type: word
+        part: header
+        words:
+          - "text/css"
+        condition: or
+      
+      - type: dsl
+        dsl:
+          - "content_length > 100"
+          - "!contains(tolower(body), '404 not found')"
+          - "!contains(tolower(body), 'not found on this server')"
+    
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-json/wp/v2/plugins"
+    
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      
+      - type: word
+        part: body
+        words:
+          - "essential-addons-for-elementor-lite"
+        condition: or
+      
+      - type: word
+        part: header
+        words:
+          - "application/json"
+        condition: or
